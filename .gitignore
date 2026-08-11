@@ -1,0 +1,18 @@
+# Virtual environment
+.venv/
+venv/
+ENV/
+env/
+
+# Python cache
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Data directories - ignore raw matches contents, keep the directory structure
+data/raw_matches/*
+!data/raw_matches/.gitkeep
+
+# Environment variables
+.env
