@@ -2,3 +2,10 @@ requests
 pandas
 numpy
 scikit-learn
+xgboost
+fastapi
+uvicorn[standard]
+pydantic
+joblib
+python-dotenv
+groq
