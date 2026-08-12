@@ -90,7 +90,7 @@ export default function App() {
     };
 
     try {
-      const response = await fetch('${API_BASE}/predict', {
+      const response = await fetch(`${API_BASE}/predict`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
