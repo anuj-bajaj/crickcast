@@ -27,8 +27,10 @@ Given the current match state (score, wickets, overs, target), Crickcast predict
 
 ## Live demo
 
-- Frontend: _add link after deploy_
-- API docs: _add link after deploy_
+- Frontend: [crickcast-sooty.vercel.app](https://crickcast-sooty.vercel.app/)
+- API docs: [crickcast-backend.onrender.com/docs](https://crickcast-backend.onrender.com/docs)
+
+Note: the backend is hosted on Render's free tier, so it may take 30-60 seconds to wake up on the first request after a period of inactivity.
 
 ## Tech stack
 
