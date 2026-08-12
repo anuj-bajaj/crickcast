@@ -31,11 +31,23 @@ RAW_DIR.mkdir(parents=True, exist_ok=True)
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # ---------- Step 1: Download & unzip ----------
+# Cricsheet is behind bot-protection (Cloudflare-style JS challenge) that
+# python-requests cannot pass. Download the zip manually once through a
+# real browser and place it at LOCAL_ZIP_PATH — the script extracts from
+# there instead of hitting the network.
+LOCAL_ZIP_PATH = Path("data/downloads/t20s_male_json.zip")
+
 def download_and_extract():
-    print("Downloading Cricsheet T20 bundle...")
-    resp = requests.get(CRICSHEET_URL, timeout=120)
-    resp.raise_for_status()
-    with zipfile.ZipFile(io.BytesIO(resp.content)) as z:
+    if not LOCAL_ZIP_PATH.exists():
+        raise FileNotFoundError(
+            f"Expected zip at {LOCAL_ZIP_PATH} but it's not there.\n"
+            f"Download it manually: open "
+            f"https://cricsheet.org/downloads/t20s_male_json.zip in your browser, "
+            f"save it to {LOCAL_ZIP_PATH.parent}/, then re-run this script."
+        )
+
+    print(f"Extracting local zip: {LOCAL_ZIP_PATH}")
+    with zipfile.ZipFile(LOCAL_ZIP_PATH) as z:
         z.extractall(RAW_DIR)
     print(f"Extracted to {RAW_DIR}")
 
@@ -81,15 +93,29 @@ def parse_match(match_json: dict, match_id: str):
     for over_data in second_innings.get("overs", []):
         over_num = over_data.get("over")
         for delivery in over_data.get("deliveries", []):
-            ball_count += 1
-            runs_this_ball = delivery.get("runs", {}).get("total", 0)
+            extras = delivery.get("extras", {})
+            is_wide = "wides" in extras
+            is_noball = "noballs" in extras
+            is_illegal_delivery = is_wide or is_noball  # doesn't count toward the 6 balls of an over
+
+            runs_this_ball = delivery.get("runs", {}).get("total", 0)  # includes extras, correct as-is
             is_wicket = 1 if "wickets" in delivery else 0
 
             cum_runs += runs_this_ball
             cum_wickets += is_wicket
-            recent_runs_window.append(runs_this_ball)
-            if len(recent_runs_window) > 12:
-                recent_runs_window.pop(0)
+
+            # Only legal deliveries advance the ball count / overs — this is the fix
+            if not is_illegal_delivery:
+                ball_count += 1
+                recent_runs_window.append(runs_this_ball)
+                if len(recent_runs_window) > 12:
+                    recent_runs_window.pop(0)
+            else:
+                # extras still count toward the recent-form signal, just not as
+                # a distinct "ball" — add their runs to whatever the last legal
+                # ball's contribution was, so a flurry of extras isn't invisible
+                if recent_runs_window:
+                    recent_runs_window[-1] += runs_this_ball
 
             balls_remaining = max(total_balls_in_innings - ball_count, 0)
             runs_required = max(target - cum_runs, 0)
@@ -117,6 +143,8 @@ def parse_match(match_json: dict, match_id: str):
                 "recent_run_rate": round(recent_run_rate, 2),
                 "is_wicket_this_ball": is_wicket,
                 "runs_this_ball": runs_this_ball,
+                "is_wide": int(is_wide),
+                "is_noball": int(is_noball),
                 "target": target,
                 "batting_team_won": batting_team_won,
             })

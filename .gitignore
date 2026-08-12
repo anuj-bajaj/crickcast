@@ -14,5 +14,11 @@ env/
 data/raw_matches/*
 !data/raw_matches/.gitkeep
 
+# Node dependencies (frontend)
+frontend/node_modules/
+
+# Raw downloaded data
+data/downloads/
+
 # Environment variables
 .env

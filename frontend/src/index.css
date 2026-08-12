@@ -1,0 +1,90 @@
+@import "tailwindcss";
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;0,9..144,700;0,9..144,900;1,9..144,500&family=JetBrains+Mono:wght@400;500;700;800&family=Inter:wght@400;500;600;700&display=swap');
+
+@theme {
+  /* Signature accent — Wisden almanack yellow, used sparingly and deliberately */
+  --color-brand-yellow: #f2c230;
+  --color-brand-yellow-glow: rgba(242, 194, 48, 0.35);
+
+  /* Deep pine green — the structural, "ink" color of the page */
+  --color-brand-pine: #1b3a2b;
+  --color-brand-pine-light: #2a4f3a;
+  --color-brand-pine-dark: #12261c;
+
+  /* Warm parchment — the page background, not navy-black */
+  --color-brand-parchment: #f4efe1;
+  --color-brand-parchment-dim: #e8e1cd;
+  --color-brand-card: #fbf8f0;
+
+  /* Semantic accents */
+  --color-brand-wicket: #8c2f39;
+  --color-brand-wicket-glow: rgba(140, 47, 57, 0.25);
+  --color-brand-moss: #3f6b4d;
+  --color-brand-moss-glow: rgba(63, 107, 77, 0.25);
+  --color-brand-amber: #d97706;
+}
+
+body {
+  background-color: var(--color-brand-parchment);
+  color: var(--color-brand-pine);
+  font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  margin: 0;
+  padding: 0;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Display serif — wordmark, headings, editorial voice of the page */
+.font-display {
+  font-family: 'Fraunces', Georgia, serif;
+}
+
+/* Scoreboard mono — every number that's meant to feel mechanical/live */
+.font-scoreboard {
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Custom scrollbar, retuned to the new palette */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--color-brand-parchment-dim);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-brand-pine-light);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-brand-pine);
+}
+
+/* Scoreboard digit glow — the signature effect, warm amber/yellow instead of neon cyan */
+.scoreboard-glow {
+  text-shadow: 0 0 12px var(--color-brand-yellow-glow), 0 0 2px rgba(0, 0, 0, 0.4);
+}
+
+.scoreboard-panel-glow {
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(27, 58, 43, 0.25);
+}
+
+/* Lined-notebook texture for the "Scorer's Notebook" collapsible section */
+.notebook-lines {
+  background-image: repeating-linear-gradient(
+    to bottom,
+    transparent,
+    transparent 27px,
+    rgba(27, 58, 43, 0.08) 28px
+  );
+}
+
+/* Respect reduced-motion preference */
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
