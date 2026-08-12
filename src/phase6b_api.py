@@ -15,10 +15,19 @@ import pandas as pd
 from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import Optional
+from fastapi.middleware.cors import CORSMiddleware
 
 from .phase6a_explanation import generate_explanation
 
 app = FastAPI(title="crickcast — win probability + explanation API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 MODEL = joblib.load("models/main_model.joblib")
 

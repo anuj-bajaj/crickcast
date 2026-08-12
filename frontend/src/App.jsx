@@ -22,6 +22,8 @@ import {
   ReferenceLine
 } from 'recharts';
 
+const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
+
 // Default initial match state
 const DEFAULT_INPUTS = {
   cum_runs: 120,
@@ -47,7 +49,7 @@ export default function App() {
   useEffect(() => {
     const checkConnection = async () => {
       try {
-        const response = await fetch('/health_check');
+        const response = await fetch(`${API_BASE}/health_check`);
         if (response.ok) {
           const data = await response.json();
           if (data.status === 'ok') {
@@ -88,7 +90,7 @@ export default function App() {
     };
 
     try {
-      const response = await fetch('/predict', {
+      const response = await fetch('${API_BASE}/predict', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
