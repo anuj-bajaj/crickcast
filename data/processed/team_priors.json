@@ -1,0 +1,102 @@
+{
+  "Australia": {
+    "last_match_date": "2026-06-21",
+    "matches_played": 217,
+    "prior": 0.533
+  },
+  "Bahrain": {
+    "last_match_date": "2026-08-01",
+    "matches_played": 110,
+    "prior": 0.467
+  },
+  "Bangladesh": {
+    "last_match_date": "2026-07-19",
+    "matches_played": 195,
+    "prior": 0.333
+  },
+  "England": {
+    "last_match_date": "2026-07-11",
+    "matches_played": 214,
+    "prior": 0.867
+  },
+  "Hong Kong": {
+    "last_match_date": "2026-06-22",
+    "matches_played": 118,
+    "prior": 0.6
+  },
+  "India": {
+    "last_match_date": "2026-07-26",
+    "matches_played": 264,
+    "prior": 0.533
+  },
+  "Indonesia": {
+    "last_match_date": "2026-06-26",
+    "matches_played": 107,
+    "prior": 0.267
+  },
+  "Ireland": {
+    "last_match_date": "2026-06-28",
+    "matches_played": 146,
+    "prior": 0.533
+  },
+  "Malaysia": {
+    "last_match_date": "2026-06-08",
+    "matches_played": 113,
+    "prior": 0.733
+  },
+  "Nepal": {
+    "last_match_date": "2026-06-08",
+    "matches_played": 110,
+    "prior": 0.733
+  },
+  "Netherlands": {
+    "last_match_date": "2026-02-18",
+    "matches_played": 112,
+    "prior": 0.467
+  },
+  "New Zealand": {
+    "last_match_date": "2026-05-02",
+    "matches_played": 242,
+    "prior": 0.467
+  },
+  "Oman": {
+    "last_match_date": "2026-06-08",
+    "matches_played": 104,
+    "prior": 0.467
+  },
+  "Pakistan": {
+    "last_match_date": "2026-02-28",
+    "matches_played": 274,
+    "prior": 0.733
+  },
+  "South Africa": {
+    "last_match_date": "2026-03-25",
+    "matches_played": 222,
+    "prior": 0.733
+  },
+  "Sri Lanka": {
+    "last_match_date": "2026-06-14",
+    "matches_played": 216,
+    "prior": 0.333
+  },
+  "Uganda": {
+    "last_match_date": "2025-10-04",
+    "matches_played": 102,
+    "prior": 0.867
+  },
+  "United Arab Emirates": {
+    "last_match_date": "2026-04-21",
+    "matches_played": 124,
+    "prior": 0.4
+  },
+  "West Indies": {
+    "last_match_date": "2026-06-14",
+    "matches_played": 229,
+    "prior": 0.533
+  },
+  "Zimbabwe": {
+    "last_match_date": "2026-07-26",
+    "matches_played": 173,
+    "prior": 0.333
+  }
+}

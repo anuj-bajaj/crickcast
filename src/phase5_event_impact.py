@@ -60,14 +60,19 @@ def summarize_by_event(df: pd.DataFrame):
 
 
 def plot_swings(summary: pd.DataFrame):
+    from plot_style import apply_brand_style, MOSS, WICKET
+    apply_brand_style()
+
     fig, ax = plt.subplots(figsize=(8, 5))
-    colors = ["#d62728" if v < 0 else "#2ca02c" for v in summary["mean_swing"]]
-    ax.bar(summary["event_type"], summary["mean_swing"], color=colors)
-    ax.axhline(0, color="black", linewidth=0.8)
+    colors = [WICKET if v < 0 else MOSS for v in summary["mean_swing"]]
+    ax.bar(summary["event_type"], summary["mean_swing"], color=colors, width=0.6, edgecolor="none")
+    ax.axhline(0, color="#1b3a2b", linewidth=1, alpha=0.5)
     ax.set_ylabel("Mean win-probability swing (batting team)")
     ax.set_title("Average win-probability swing by event type")
-    ax.grid(alpha=0.3, axis="y")
+    ax.grid(axis="x")  # only horizontal gridlines matter for a bar chart
+
     fig.savefig(f"{OUT_DIR}/event_impact_swing.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
     print(f"Saved plot to {OUT_DIR}/event_impact_swing.png")
 
 

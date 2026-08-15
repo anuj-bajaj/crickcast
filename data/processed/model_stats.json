@@ -1,0 +1,13 @@
+{
+  "deliveries_trained_on": 251493,
+  "baseline_accuracy": 0.8243186821528885,
+  "baseline_auc": 0.9152459121469886,
+  "baseline_log_loss": 0.36526055888950526,
+  "baseline_brier": 0.1183414613162794,
+  "main_model_accuracy": 0.8353070674865255,
+  "main_model_auc": 0.9239740305628221,
+  "main_model_log_loss": 0.34397849440574646,
+  "main_model_brier": 0.11149570345878601,
+  "baseline_ece": 0.017940146452238414,
+  "main_model_ece": 0.011763995016272857
+}

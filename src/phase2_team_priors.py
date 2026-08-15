@@ -111,6 +111,50 @@ def attach_priors_to_ball_data(match_df: pd.DataFrame, priors: dict):
     return pd.DataFrame(rows)
 
 
+def compute_current_team_snapshot(match_df: pd.DataFrame, min_matches: int = 10, top_n: int = 20):
+    """
+    Team strength "as of right now" — each team's win rate over its most
+    recent ROLLING_WINDOW matches, using ALL matches in the dataset (unlike
+    compute_rolling_priors above, which only looks "before some future
+    match" for a specific training row). This is what the live app offers
+    as a starting-point prior when someone picks a real team on the Setup
+    page, instead of a bare manual slider with no team behind it.
+
+    Teams with fewer than `min_matches` total appearances in the dataset
+    are dropped — with only a handful of matches, a "last 15" rolling
+    window barely means anything and would just be noise in the dropdown.
+    The result is then capped to the `top_n` teams by total matches played,
+    so the Setup page dropdown stays to recognizable, well-established
+    sides rather than listing all ~100 associate nations in the data.
+    """
+    history_rows = []
+    for _, row in match_df.iterrows():
+        history_rows.append({"date": row["date"], "team": row["team1"], "won": int(row["winner"] == row["team1"])})
+        history_rows.append({"date": row["date"], "team": row["team2"], "won": int(row["winner"] == row["team2"])})
+    hist = pd.DataFrame(history_rows).sort_values("date").reset_index(drop=True)
+
+    team_results = {}
+    team_last_date = {}
+    for _, row in hist.iterrows():
+        team = row["team"]
+        team_results.setdefault(team, []).append(row["won"])
+        team_last_date[team] = row["date"]
+
+    snapshot = {}
+    for team, results in team_results.items():
+        if len(results) < min_matches:
+            continue
+        window = results[-ROLLING_WINDOW:]
+        snapshot[team] = {
+            "prior": round(sum(window) / len(window), 3),
+            "matches_played": len(results),
+            "last_match_date": team_last_date[team].strftime("%Y-%m-%d"),
+        }
+
+    top_teams = sorted(snapshot.items(), key=lambda kv: -kv[1]["matches_played"])[:top_n]
+    return dict(top_teams)
+
+
 if __name__ == "__main__":
     match_df = extract_match_level_info()
     priors = compute_rolling_priors(match_df)
@@ -120,6 +164,12 @@ if __name__ == "__main__":
         path = OUT_DIR / f"{split}.csv"
         df = pd.read_csv(path, dtype={"match_id": str})
         prior_lookup["match_id"] = prior_lookup["match_id"].astype(str)
+        # Drop any prior columns from an earlier run of this script before
+        # merging — otherwise re-running phase2 (e.g. after a re-run of
+        # phase1) silently produces batting_team_prior_x/_y instead of a
+        # clean overwrite, and the KeyError two lines down is a confusing
+        # way to find that out.
+        df = df.drop(columns=["batting_team_prior", "bowling_team_prior"], errors="ignore")
         before_cols = set(df.columns)
         df = df.merge(prior_lookup, on="match_id", how="left")
         # Any match without a prior lookup (shouldn't normally happen) gets neutral 0.5
@@ -131,3 +181,13 @@ if __name__ == "__main__":
               f"{df['match_id'].nunique()} matches")
 
     print("Done. team_strength_prior features merged into train/val/test CSVs.")
+
+    # ---- Team snapshot for the frontend's team-selection dropdown ----
+    # Gets copied to frontend/public/team_priors.json, same as
+    # model_stats.json — the live app fetches it to offer real teams
+    # instead of two bare, teamless 0-100% sliders.
+    import json
+    snapshot = compute_current_team_snapshot(match_df, min_matches=10)
+    with open(OUT_DIR / "team_priors.json", "w") as f:
+        json.dump(snapshot, f, indent=2, sort_keys=True)
+    print(f"Saved {len(snapshot)} teams (>=10 matches) to {OUT_DIR}/team_priors.json")

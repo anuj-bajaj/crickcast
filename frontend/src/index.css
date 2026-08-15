@@ -1,5 +1,5 @@
-@import "tailwindcss";
 @import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;0,9..144,700;0,9..144,900;1,9..144,500&family=JetBrains+Mono:wght@400;500;700;800&family=Inter:wght@400;500;600;700&display=swap');
+@import "tailwindcss";
 
 @theme {
   /* Signature accent — Wisden almanack yellow, used sparingly and deliberately */
@@ -87,4 +87,24 @@ body {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* Live header shimmer — a slow-moving gradient sweep, subtle "broadcast" feel */
+@keyframes header-shimmer {
+  0% { background-position: 0% 50%; }
+  100% { background-position: 200% 50%; }
+}
+.header-shimmer {
+  background: linear-gradient(90deg, var(--color-brand-pine) 0%, var(--color-brand-amber) 50%, var(--color-brand-pine) 100%);
+  background-size: 200% 100%;
+  animation: header-shimmer 6s linear infinite;
+}
+
+/* Ambient drifting glow for the landing screen */
+@keyframes drift {
+  0%, 100% { transform: translate(0, 0); }
+  50% { transform: translate(30px, -20px); }
+}
+.drift-blob {
+  animation: drift 12s ease-in-out infinite;
 }

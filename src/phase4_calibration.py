@@ -15,6 +15,7 @@ This script:
   4. Saves a calibration plot for both baseline and main model
 """
 
+import json
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -52,21 +53,28 @@ def compute_calibration(y_true, y_proba, n_bins=N_BINS):
 
 
 def plot_calibration(cal_baseline, cal_main, ece_baseline, ece_main):
+    from plot_style import apply_brand_style, PINE, AMBER
+    apply_brand_style()
+
     fig, ax = plt.subplots(figsize=(7, 7))
-    ax.plot([0, 1], [0, 1], linestyle="--", color="gray", label="Perfect calibration")
+    ax.plot([0, 1], [0, 1], linestyle="--", color=PINE, alpha=0.35, linewidth=1.5, label="Perfect calibration")
 
     ax.plot(cal_baseline["mean_predicted"], cal_baseline["actual_win_rate"],
-             marker="o", label=f"Baseline (ECE={ece_baseline:.3f})")
+             marker="o", markersize=5, color=AMBER, linewidth=2, alpha=0.9,
+             label=f"Baseline (ECE={ece_baseline:.3f})")
     ax.plot(cal_main["mean_predicted"], cal_main["actual_win_rate"],
-             marker="o", label=f"Main model / XGBoost (ECE={ece_main:.3f})")
+             marker="o", markersize=6.5, color=PINE, linewidth=2.5,
+             label=f"Main model / XGBoost (ECE={ece_main:.3f})")
 
     ax.set_xlabel("Mean predicted probability")
     ax.set_ylabel("Actual observed win rate")
     ax.set_title("Calibration curve: predicted vs. actual win probability")
-    ax.legend()
-    ax.grid(alpha=0.3)
+    ax.set_xlim(-0.03, 1.03)
+    ax.set_ylim(-0.03, 1.03)
+    ax.legend(loc="upper left")
 
     fig.savefig(f"{OUT_DIR}/calibration_curve.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
     print(f"Saved plot to {OUT_DIR}/calibration_curve.png")
 
 
@@ -89,3 +97,19 @@ if __name__ == "__main__":
     print(f"\nMain model ECE: {ece_main:.4f}")
 
     plot_calibration(cal_baseline, cal_main, ece_baseline, ece_main)
+
+    # ---- Add ECE to the shared model-stats file (see phase3_modeling.py) ----
+    # Phase 3 writes this file first with accuracy/AUC/etc; this appends the
+    # calibration numbers onto the same file rather than creating a second
+    # one, so the frontend only ever has to fetch a single source of truth.
+    stats_path = f"{OUT_DIR}/model_stats.json"
+    try:
+        with open(stats_path) as f:
+            stats = json.load(f)
+    except FileNotFoundError:
+        stats = {}
+    stats["baseline_ece"] = ece_baseline
+    stats["main_model_ece"] = ece_main
+    with open(stats_path, "w") as f:
+        json.dump(stats, f, indent=2)
+    print(f"\nUpdated {stats_path} with calibration stats")

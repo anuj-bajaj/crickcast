@@ -9,3 +9,6 @@ pydantic
 joblib
 python-dotenv
 groq
+matplotlib
+pytest
+httpx
