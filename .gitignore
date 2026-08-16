@@ -22,3 +22,6 @@ data/downloads/
 
 # Environment variables
 .env
+
+# Derived CSVs
+data/processed/*.csv
