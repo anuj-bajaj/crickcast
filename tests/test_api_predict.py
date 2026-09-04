@@ -1,7 +1,8 @@
 """
 End-to-end checks against the real FastAPI app: the decided-state
-short-circuit in /predict, the response contract, and graceful
-degradation when the Groq explanation service is unavailable.
+short-circuit in /predict and the response contract. See
+test_api_explain.py for the commentary endpoint (/explain), which is
+deliberately separate — a slow/down Groq call must never affect /predict.
 """
 
 
@@ -52,41 +53,18 @@ def test_overs_complete_short_circuits_to_zero(client):
     assert r.json()["win_probability"] == 0.0
 
 
-def test_swing_and_explanation_keys_present_with_previous_proba(client):
+def test_swing_present_no_explanation_in_predict(client):
+    """/predict computes swing (it needs both probabilities, which it
+    already has), but no longer generates commentary — that moved to
+    /explain, deliberately, so a slow/rate-limited Groq call can never
+    delay the win-probability response. See phase6b_api.py's comment on
+    /predict for the full reasoning."""
     r = client.post("/predict", json=_base_payload(previous_proba=0.5))
     assert r.status_code == 200
     body = r.json()
     assert "swing" in body
     assert body["swing"] == round(body["win_probability"] - 0.5, 4)
-    # "explanation" key must exist even if its value is null (Groq down /
-    # no key) — see test below. A missing key vs. a null value is exactly
-    # the kind of contract drift a frontend integration would silently
-    # break on.
-    assert "explanation" in body
-
-
-def test_explanation_degrades_gracefully_without_groq_key(client, monkeypatch):
-    """If GROQ_API_KEY is missing or invalid, /predict must still return
-    200 with a valid win_probability — explanation should be null, never
-    a 500. This is the fix for the original bug where a Groq outage took
-    down a response that already had a perfectly good prediction.
-
-    generate_explanation() caches its Groq client in a module-level
-    singleton (phase6a_explanation._client) so it isn't rebuilt on every
-    single call — sensible for the real app, but it means once an earlier
-    test in this same session has already built a real client against a
-    real, working key, just deleting the env var here doesn't force a
-    rebuild; the cached client gets reused regardless. Resetting the
-    singleton to None first is what actually forces _get_client() to
-    re-check the environment and hit the missing-key path this test is
-    meant to exercise.
-    """
-    from src import phase6a_explanation
-    monkeypatch.setattr(phase6a_explanation, "_client", None)
-    monkeypatch.delenv("GROQ_API_KEY", raising=False)
-    r = client.post("/predict", json=_base_payload(previous_proba=0.5))
-    assert r.status_code == 200
-    assert r.json()["explanation"] is None
+    assert "explanation" not in body
 
 
 def test_team_names_are_optional(client):

@@ -19,6 +19,19 @@ export default defineConfig(({ mode }) => {
           target: target,
           changeOrigin: true,
         },
+        // Commentary, split out from /predict (see phase6b_api.py and
+        // App.jsx's triggerPrediction) so a slow/rate-limited Groq call
+        // never blocks the win-probability response. Needs its own dev-
+        // proxy entry for the same reason /predict does — without this,
+        // `npm run dev` would send /explain to the Vite dev server
+        // itself (which has no such route) instead of the FastAPI
+        // backend. Production is unaffected: VITE_API_BASE_URL there
+        // points requests straight at the deployed backend origin, no
+        // proxy involved.
+        '/explain': {
+          target: target,
+          changeOrigin: true,
+        },
         '/health_check': {
           target: target,
           changeOrigin: true,

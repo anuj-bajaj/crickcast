@@ -42,6 +42,12 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
 // should actually live.
 const STORAGE_KEY = 'crickcast_session_v1';
 
+// Module-level (not per-render) so it's a stable reference for the
+// scorecardChips useMemo below — a `const` re-created inside the component
+// body on every render would defeat that memoization if added as a
+// dependency, which is why it lives here instead.
+const LEGAL_BALL_EVENTS = new Set(['dot_ball', 'single', 'two', 'three', 'four', 'six', 'wicket']);
+
 // Nothing is pre-filled here on purpose — the whole point of the setup
 // stage is that the user supplies the target and (optionally) the current
 // match state, and every derived number is computed from that.
@@ -290,6 +296,22 @@ export default function App() {
   const [backendConnected, setBackendConnected] = useState(null);
   const [autoSubmit, setAutoSubmit] = useState(true);
   const [editingState, setEditingState] = useState(false);
+  // Snapshot of `inputs` taken the instant the Alter State editor is
+  // opened — NOT re-derived from `inputs` at submit time, because
+  // ScorersNotebookFields writes every keystroke straight into `inputs`
+  // (the same state object used as "current"). Without a separately
+  // captured snapshot, by the time handleManualSubmit runs, the "before"
+  // state has already been overwritten by the user's edits, so before ===
+  // after on every field — which is exactly how an Alter State jump of
+  // e.g. 30 runs and 3 overs got sent to the explanation layer as "0 legal
+  // deliveries, wide/no-ball, every number unchanged" instead of the real,
+  // possibly large, before/after delta it actually represents.
+  const preEditInputsRef = useRef(null);
+  // Monotonically increasing id for each history entry — see
+  // triggerPrediction's use of it. Needs to survive across renders as a
+  // ref (not state) since it's read-then-incremented synchronously and
+  // must never trigger its own re-render.
+  const recordIdCounter = useRef(0);
   // Controls the Scorer's Notebook <details> on the setup page — normally
   // left to the browser's native toggle, but a Quick Start chip that fills
   // in non-zero notebook fields (mid-chase scenarios) needs to force it
@@ -376,7 +398,7 @@ export default function App() {
     if (!hydrated) return;
     try {
       sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ matchStarted, inputs, history }));
-    } catch (err) {
+    } catch {
       // Private browsing / storage full / disabled — losing persistence
       // here just means refresh behaves like it used to. Not worth surfacing.
     }
@@ -391,7 +413,7 @@ export default function App() {
           if (data.status === 'ok') { setBackendConnected(true); return; }
         }
         setBackendConnected(false);
-      } catch (err) {
+      } catch {
         setBackendConnected(false);
       }
     };
@@ -413,7 +435,7 @@ export default function App() {
         const response = await fetch('/model_stats.json', { cache: 'no-store' });
         if (!response.ok) throw new Error('model_stats.json not found');
         setAlmanackStats(await response.json());
-      } catch (err) {
+      } catch {
         setAlmanackStats(null);
       }
     };
@@ -439,7 +461,7 @@ export default function App() {
         const response = await fetch('/team_priors.json', { cache: 'no-store' });
         if (!response.ok) throw new Error('team_priors.json not found');
         setTeamPriors(await response.json());
-      } catch (err) {
+      } catch {
         setTeamPriors({});
       }
     };
@@ -470,7 +492,43 @@ export default function App() {
     const stats = deriveMatchStats(currentInputs);
     const recentRunRate = currentInputs.recent_run_rate ?? stats.currentRunRate;
 
-    const payload = {
+    // "Before this ball" snapshot, purely for the explanation prompt — lets
+    // it cite only what actually changed instead of guessing from a single
+    // end-state snapshot (see phase6a_explanation.py; this is the fix for
+    // commentary citing static, unchanged numbers like wickets-down as if
+    // they explained a swing they had nothing to do with).
+    const beforeStats = preBallInputs ? deriveMatchStats(preBallInputs) : null;
+    const overJustCompleted = !!(
+      beforeStats && stats.ballsRemaining < beforeStats.ballsRemaining && stats.ballsBowled % 6 === 0
+    );
+    // How many legal deliveries actually happened since the last time a
+    // prediction was requested — normally 1, but can be more than that
+    // (Auto-predict toggled off for a few balls then back on, or a big
+    // manual edit via Alter State) and 0 for a wide/no-ball, which
+    // doesn't consume a legal delivery. Without this, the explanation
+    // prompt has no way to know it's describing a multi-ball jump instead
+    // of one discrete ball — which is exactly how you get a sentence
+    // confidently narrating "another wicket" as if it alone explains a
+    // swing that's actually the combined effect of five or six deliveries.
+    // Can go negative if Alter State moves the innings BACKWARD (the user
+    // corrects an overs/balls value to something earlier than it was) —
+    // the API rejects negative balls_elapsed outright (it isn't a
+    // meaningful "how many balls just happened" count), so send null
+    // instead of a value that would 422 the whole request. null already
+    // means "unknown, describe generically" to the explanation layer.
+    const rawBallsElapsed = beforeStats ? beforeStats.ballsRemaining - stats.ballsRemaining : null;
+    const ballsElapsed = rawBallsElapsed !== null && rawBallsElapsed >= 0 ? rawBallsElapsed : null;
+
+    // Only the fields /predict actually needs. Deliberately does NOT
+    // include anything explanation-only (team names, before/after
+    // snapshot, raw_event) — /predict is a fast, local-model call that
+    // must never wait on anything else. See phase6b_api.py's comment on
+    // /predict for why this is split from /explain below: bundling both
+    // into one request meant ANY Groq slowness (a third-party network
+    // call, occasionally several seconds under Groq's free-tier rate
+    // limit) froze the ENTIRE UI, including the probability number that
+    // has nothing to do with it.
+    const predictPayload = {
       cum_runs: stats.cumRuns,
       cum_wickets: stats.cumWickets,
       balls_remaining: stats.ballsRemaining,
@@ -482,48 +540,117 @@ export default function App() {
       bowling_team_prior: parseFloat(currentInputs.bowling_team_prior),
       event_type: currentInputs.event_type,
       previous_proba: prevProba,
-      batting_team: currentInputs.batting_team_name || null,
-      bowling_team: currentInputs.bowling_team_name || null,
     };
 
+    let result;
     try {
       const response = await fetch(`${API_BASE}/predict`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(predictPayload),
       });
       if (!response.ok) {
         const errText = await response.text();
         throw new Error(`API Error: ${response.status} - ${errText}`);
       }
-      const result = await response.json();
-      const newRecord = {
-        ballIndex: history.length + 1,
-        ...payload,
-        win_probability: result.win_probability,
-        swing: result.swing !== undefined ? result.swing : null,
-        explanation: result.explanation || null,
-        // Snapshot of the raw inputs right before this ball was applied —
-        // lets "Undo" restore the exact prior state instead of trying to
-        // algebraically reverse an event (which isn't always invertible,
-        // e.g. "other_runs" covers 1/2/3/wide/noball indistinguishably).
-        preBallInputs: preBallInputs ?? currentInputs,
-        // The literal button clicked (dot_ball/single/.../wicket/wide/
-        // noball), kept separate from `event_type` above — that field is
-        // already collapsed to the model's 5 categories (1/2/3/wide/noball
-        // all become "other_runs"), which loses exactly the detail a
-        // scorecard strip needs to show. Falls back to a "state set"
-        // marker for entries that came from the Setup/Alter-State forms
-        // rather than an actual recorded delivery.
-        displayEvent: rawEvent ?? 'state_set',
-      };
-      setHistory((prev) => [...prev, newRecord]);
-      setInputs(prev => ({ ...prev, recent_run_rate: recentRunRate, event_type: currentInputs.event_type }));
+      result = await response.json();
     } catch (err) {
       console.error(err);
       setError(err.message || 'Failed to submit prediction request.');
-    } finally {
       setLoading(false);
+      return;
+    }
+
+    // Stable per-ball id so the /explain response (which resolves later,
+    // asynchronously, below) can find and patch the RIGHT history entry —
+    // ballIndex/array position isn't safe to rely on here since Undo can
+    // remove entries before that response comes back.
+    const recordId = ++recordIdCounter.current;
+
+    const newRecord = {
+      id: recordId,
+      ballIndex: history.length + 1,
+      ...predictPayload,
+      win_probability: result.win_probability,
+      swing: result.swing !== undefined ? result.swing : null,
+      // Starts null and gets patched in-place once /explain resolves
+      // below — the whole point of the split is that the probability
+      // above is already final and on-screen well before this arrives.
+      explanation: null,
+      // Distinct from "explanation is null because there's nothing to
+      // say yet" (the very first ball, which never gets commentary) vs.
+      // "still waiting on Groq" vs. "Groq call finished/failed" — the
+      // commentary panel below uses this to show a distinct "generating"
+      // state instead of jumping straight to the empty-state placeholder.
+      explanationPending: prevProba !== null,
+      // Snapshot of the raw inputs right before this ball was applied —
+      // lets "Undo" restore the exact prior state instead of trying to
+      // algebraically reverse an event (which isn't always invertible,
+      // e.g. "other_runs" covers 1/2/3/wide/noball indistinguishably).
+      preBallInputs: preBallInputs ?? currentInputs,
+      // The literal button clicked (dot_ball/single/.../wicket/wide/
+      // noball), kept separate from `event_type` above — that field is
+      // already collapsed to the model's 5 categories (1/2/3/wide/noball
+      // all become "other_runs"), which loses exactly the detail a
+      // scorecard strip needs to show. Falls back to a "state set"
+      // marker for entries that came from the Setup/Alter-State forms
+      // rather than an actual recorded delivery.
+      displayEvent: rawEvent ?? 'state_set',
+    };
+    setHistory((prev) => [...prev, newRecord]);
+    setInputs(prev => ({ ...prev, recent_run_rate: recentRunRate, event_type: currentInputs.event_type }));
+    setLoading(false);
+
+    // Commentary only ever makes sense once there's a previous probability
+    // to swing away from — the very first ball of an innings has nothing
+    // to compare against, same gating /predict used to apply internally
+    // before this split. Fired here WITHOUT awaiting — the probability
+    // above is already committed to history and on screen; letting this
+    // resolve in the background, on its own timeline, is the entire
+    // point of splitting it out of /predict.
+    if (prevProba !== null) {
+      const explainPayload = {
+        event_type: currentInputs.event_type,
+        proba_before: prevProba,
+        proba_after: result.win_probability,
+        swing: result.swing,
+        cum_runs: stats.cumRuns,
+        cum_wickets: stats.cumWickets,
+        balls_remaining: stats.ballsRemaining,
+        runs_required: stats.runsRequired ?? 0,
+        required_run_rate: stats.requiredRunRate ?? 0,
+        batting_team: currentInputs.batting_team_name || null,
+        bowling_team: currentInputs.bowling_team_name || null,
+        cum_runs_before: beforeStats ? beforeStats.cumRuns : null,
+        cum_wickets_before: beforeStats ? beforeStats.cumWickets : null,
+        balls_remaining_before: beforeStats ? beforeStats.ballsRemaining : null,
+        required_run_rate_before: beforeStats && beforeStats.requiredRunRate !== null ? beforeStats.requiredRunRate : null,
+        over_just_completed: overJustCompleted,
+        balls_elapsed: ballsElapsed,
+        raw_event: rawEvent || null,
+      };
+      fetch(`${API_BASE}/explain`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(explainPayload),
+      })
+        .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`Explain API error: ${res.status}`))))
+        .then((data) => {
+          setHistory((prev) => prev.map((item) =>
+            item.id === recordId ? { ...item, explanation: data.explanation || null, explanationPending: false } : item
+          ));
+        })
+        .catch((err) => {
+          // A failed/slow/rate-limited commentary call degrades to no
+          // commentary for this one ball — this deliberately never
+          // touches the global `error` banner, which is reserved for
+          // prediction failures. A missed line of commentary shouldn't
+          // read as an app error to the person using it.
+          console.warn('Commentary generation failed for this ball:', err);
+          setHistory((prev) => prev.map((item) =>
+            item.id === recordId ? { ...item, explanationPending: false } : item
+          ));
+        });
     }
   };
 
@@ -537,7 +664,13 @@ export default function App() {
     e.preventDefault();
     if (!targetIsValid || inningsOver) return;
     const lastProba = history.length > 0 ? history[history.length - 1].win_probability : null;
-    await triggerPrediction(inputs, lastProba, inputs);
+    // Use the state captured when the editor was opened, not `inputs`
+    // itself — see preEditInputsRef above. Falls back to `inputs` (old
+    // behavior) only if the ref was somehow never set, e.g. the very
+    // first ball of the innings being entered via Setup's Scorer's
+    // Notebook rather than the live Alter State editor, where there's no
+    // real "before" to diff against anyway.
+    await triggerPrediction(inputs, lastProba, preEditInputsRef.current ?? inputs);
     setEditingState(false);
   };
 
@@ -649,6 +782,12 @@ export default function App() {
   const currentProbability = latestPrediction ? latestPrediction.win_probability : null;
   const currentSwing = latestPrediction ? latestPrediction.swing : null;
   const currentExplanation = latestPrediction ? latestPrediction.explanation : null;
+  // True only while /explain is actually in flight for the LATEST ball —
+  // distinct from "no explanation, never will be" (first ball) or "the
+  // call finished/failed" (explanationPending is set back to false in
+  // both of those cases in triggerPrediction). Drives a "generating…"
+  // message instead of jumping straight to the empty-state placeholder.
+  const currentExplanationPending = latestPrediction ? !!latestPrediction.explanationPending : false;
   const animatedProbability = useAnimatedNumber(currentProbability !== null ? currentProbability * 100 : 0, 700);
 
   // A brief, one-shot shake on the Match Center panel when a wicket falls.
@@ -747,20 +886,24 @@ export default function App() {
     // pretending it was a ball.
     state_set: { label: '◆', cls: 'bg-brand-pine/5 text-brand-pine/30 border-brand-pine/10 text-[9px]' },
   };
-  const LEGAL_BALL_EVENTS = new Set(['dot_ball', 'single', 'two', 'three', 'four', 'six', 'wicket']);
-
   // Only legal deliveries close out an over (wides/no-balls/state-set
   // entries don't), matching the exact rule Phase 1 uses when building the
-  // training data — so the over-divider lines in the strip land in the
-  // same place a real scorecard's would.
+  // training data. Anchored to the ACTUAL innings position via
+  // balls_remaining (which deriveMatchStats always computes relative to
+  // the full 120-ball innings, not relative to when recording started) —
+  // not a count of "6 balls since we started recording". Without this,
+  // starting mid-innings (Scorer's Notebook, a Quick Start scenario) put
+  // the divider 6 *recorded* balls in, which almost never lines up with
+  // where the over boundary actually falls once you started partway
+  // through an over.
   const scorecardChips = useMemo(() => {
-    let legalCount = 0;
     return history.map((item) => {
       const isLegal = LEGAL_BALL_EVENTS.has(item.displayEvent);
-      if (isLegal) legalCount += 1;
-      return { ...item, overComplete: isLegal && legalCount % 6 === 0 };
+      const ballsBowledInInnings = 120 - item.balls_remaining;
+      const overComplete = isLegal && ballsBowledInInnings > 0 && ballsBowledInInnings % 6 === 0;
+      return { ...item, overComplete };
     });
-  }, [history]);
+  }, [history]); // LEGAL_BALL_EVENTS is a stable module-level constant, not a real dependency
 
   const StepPip = ({ id, label }) => (
     <div className="relative px-3 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-wide">
@@ -1156,11 +1299,18 @@ export default function App() {
                   </div>
                   <AnimatePresence mode="wait">
                     <motion.p
-                      key={currentExplanation}
+                      key={currentExplanationPending ? 'pending' : currentExplanation}
                       initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }}
-                      className="text-sm text-brand-parchment/90 leading-relaxed min-h-[40px]"
+                      className="text-sm text-brand-parchment/90 leading-relaxed min-h-[40px] flex items-center gap-2"
                     >
-                      {currentExplanation || "Tap a ball event below to generate live commentary explaining each swing in win probability."}
+                      {currentExplanationPending ? (
+                        <>
+                          <span className="inline-block w-3 h-3 border-2 border-brand-parchment/40 border-t-brand-yellow rounded-full animate-spin shrink-0" aria-hidden="true" />
+                          <span className="text-brand-parchment/60 italic">Generating commentary…</span>
+                        </>
+                      ) : (
+                        currentExplanation || "Tap a ball event below to generate live commentary explaining each swing in win probability."
+                      )}
                     </motion.p>
                   </AnimatePresence>
                 </div>
@@ -1185,7 +1335,14 @@ export default function App() {
                       <input id="auto-submit-toggle" type="checkbox" checked={autoSubmit} onChange={(e) => setAutoSubmit(e.target.checked)}
                         className="rounded border-brand-pine/30 text-brand-pine focus:ring-brand-pine w-4 h-4 cursor-pointer" />
                     </div>
-                    <button onClick={() => setEditingState((v) => !v)} className={`flex items-center gap-1.5 text-xs font-semibold cursor-pointer ${editingState ? 'text-brand-amber' : 'text-brand-pine/70 hover:text-brand-pine'}`}>
+                    <button onClick={() => setEditingState((v) => {
+                        const next = !v;
+                        // Snapshot `inputs` at the moment the editor opens — see
+                        // preEditInputsRef above for why this can't just be read
+                        // from `inputs` later, at submit time.
+                        if (next) preEditInputsRef.current = inputs;
+                        return next;
+                      })} className={`flex items-center gap-1.5 text-xs font-semibold cursor-pointer ${editingState ? 'text-brand-amber' : 'text-brand-pine/70 hover:text-brand-pine'}`}>
                       <Settings2 className="w-3.5 h-3.5" aria-hidden="true" /> {editingState ? 'Close editor' : 'Alter state'}
                     </button>
                     <button onClick={handleUndo} disabled={history.length === 0 || loading} title={history.length > 0 ? 'Revert the last recorded ball' : 'Nothing to undo yet'}

@@ -1,0 +1,9 @@
+# Normalize line endings to LF for text files so a Windows editor/tool
+# run doesn't silently reintroduce CRLF and pollute future diffs with
+# noise (this happened once already — see commit history around
+# data/processed/*.json and Dockerfile).
+* text=auto eol=lf
+
+*.png binary
+*.joblib binary
+*.svg text

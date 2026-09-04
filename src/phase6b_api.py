@@ -1,10 +1,10 @@
 """
 Phase 6b — FastAPI serving layer
 
-Given a live match state, returns:
-  - predicted win probability (from the trained XGBoost model)
-  - the swing vs. the previous ball (if previous state provided)
-  - a natural-language explanation of that swing (Groq)
+Given a live match state, returns the predicted win probability (from the
+trained XGBoost model) and the swing vs. the previous ball. A separate
+/explain endpoint generates the natural-language commentary (Groq) — see
+the comment above /predict for why these are two endpoints, not one.
 
 Run: .venv/Scripts/uvicorn src.phase6b_api:app --reload
 Then test at http://127.0.0.1:8000/docs
@@ -76,15 +76,6 @@ class MatchState(BaseModel):
     # isn't a category the model or the explanation prompt know how to use.
     event_type: Literal["dot_ball", "four", "six", "wicket", "other_runs"] = "other_runs"
     previous_proba: Optional[float] = Field(default=None, ge=0, le=1)
-    # Optional — only used to personalize the Groq explanation (e.g. "India
-    # slides to 47%" instead of "the batting team slides to 47%"). Never
-    # used as a model feature: the model only ever sees the leakage-safe
-    # rolling priors above, never raw team identity, by design (see
-    # phase2_team_priors.py). A request that omits these still works
-    # exactly as before — generate_explanation falls back to generic
-    # phrasing when they're not provided.
-    batting_team: Optional[str] = None
-    bowling_team: Optional[str] = None
 
 
 @app.post("/predict")
@@ -106,31 +97,98 @@ def predict(state: MatchState):
         features = pd.DataFrame([{k: getattr(state, k) for k in MAIN_FEATURES}])
         proba = float(MODEL.predict_proba(features)[0, 1])
 
-    result = {"win_probability": round(proba, 4)}
+    proba = round(proba, 4)
+    result = {"win_probability": proba}
 
     if state.previous_proba is not None:
-        swing = proba - state.previous_proba
-        result["swing"] = round(swing, 4)
+        result["swing"] = round(proba - state.previous_proba, 4)
 
-        explanation_context = {
-            "event_type": state.event_type,
-            "proba_before": state.previous_proba,
-            "proba_after": proba,
-            "swing": swing,
-            "cum_runs": state.cum_runs,
-            "cum_wickets": state.cum_wickets,
-            "balls_remaining": state.balls_remaining,
-            "runs_required": state.runs_required,
-            "required_run_rate": state.required_run_rate,
-            "batting_team": state.batting_team,
-            "bowling_team": state.bowling_team,
-        }
-        # generate_explanation degrades to None (rather than raising) if the
-        # Groq call fails — a flaky/down explanation service shouldn't take
-        # out a response that already has a perfectly good win_probability.
-        result["explanation"] = generate_explanation(explanation_context)
-
+    # No Groq call here anymore — see /explain below. Deliberately kept
+    # this way: the win probability is the one number every other part of
+    # the UI (the scoreboard, the chart, the swing badge) depends on, and
+    # it comes from a local model that answers in milliseconds. The Groq
+    # commentary call, by contrast, is a third-party network request that
+    # can take anywhere from under a second to several seconds — longer
+    # still if Groq's free-tier rate limit (30 requests/minute) has been
+    # hit and the client is mid-retry. Bundling both into one response
+    # meant ANY Groq slowness froze the entire UI, including the
+    # probability number that had nothing to do with it. Splitting them
+    # means /predict is always fast, and a slow/failed /explain call only
+    # ever delays or blanks the commentary panel specifically.
     return result
+
+
+class ExplainRequest(BaseModel):
+    """Everything generate_explanation() needs, sent directly by the
+    frontend once it already has both probabilities from /predict — this
+    endpoint does no model inference itself, it only talks to Groq."""
+    event_type: Literal["dot_ball", "four", "six", "wicket", "other_runs"] = "other_runs"
+    proba_before: float = Field(ge=0, le=1)
+    proba_after: float = Field(ge=0, le=1)
+    swing: float = Field(ge=-1, le=1)
+    cum_runs: int = Field(ge=0, le=500)
+    cum_wickets: int = Field(ge=0, le=10)
+    balls_remaining: int = Field(ge=0, le=120)
+    runs_required: int = Field(ge=0, le=500)
+    required_run_rate: float = Field(ge=0, le=100)
+    # Optional — only used to personalize the commentary (e.g. "India
+    # slides to 47%" instead of "the batting team slides to 47%").
+    batting_team: Optional[str] = None
+    bowling_team: Optional[str] = None
+    # "Before this ball" snapshot of the fields that actually move ball to
+    # ball. Lets the prompt cite only what actually changed instead of
+    # guessing from a single end-state snapshot — see phase6a_explanation.py
+    # for the bug this fixes (citing an unchanged number, e.g. "0 wickets
+    # down", as if it explained a swing it had nothing to do with).
+    cum_runs_before: Optional[int] = Field(default=None, ge=0, le=500)
+    cum_wickets_before: Optional[int] = Field(default=None, ge=0, le=10)
+    balls_remaining_before: Optional[int] = Field(default=None, ge=0, le=120)
+    required_run_rate_before: Optional[float] = Field(default=None, ge=0, le=100)
+    # True only when this ball was the 6th legal delivery of an over.
+    over_just_completed: bool = False
+    # How many legal deliveries elapsed since the last commentary request —
+    # lets the prompt know whether it's narrating one discrete ball or a
+    # whole span of play (Auto-predict off, or a large Alter State edit).
+    balls_elapsed: Optional[int] = Field(default=None, ge=0, le=120)
+    # The literal delivery clicked, distinct from event_type above — that
+    # field collapses single/two/three/wide/noball all into "other_runs"
+    # for the model's categorical feature. This is what lets the prompt
+    # tell a wide from a no-ball, which event_type alone can't.
+    raw_event: Optional[Literal[
+        "dot_ball", "single", "two", "three", "four", "six", "wicket", "wide", "noball"
+    ]] = None
+
+
+@app.post("/explain")
+def explain(req: ExplainRequest):
+    """Separate from /predict on purpose (see the comment in /predict) —
+    the frontend calls this AFTER already showing the new win probability,
+    so a slow or rate-limited Groq call only ever delays the commentary
+    panel specifically."""
+    context = {
+        "event_type": req.event_type,
+        "proba_before": req.proba_before,
+        "proba_after": req.proba_after,
+        "swing": req.swing,
+        "cum_runs": req.cum_runs,
+        "cum_wickets": req.cum_wickets,
+        "balls_remaining": req.balls_remaining,
+        "runs_required": req.runs_required,
+        "required_run_rate": req.required_run_rate,
+        "batting_team": req.batting_team,
+        "bowling_team": req.bowling_team,
+        "cum_runs_before": req.cum_runs_before,
+        "cum_wickets_before": req.cum_wickets_before,
+        "balls_remaining_before": req.balls_remaining_before,
+        "required_run_rate_before": req.required_run_rate_before,
+        "over_just_completed": req.over_just_completed,
+        "balls_elapsed": req.balls_elapsed,
+        "raw_event": req.raw_event,
+    }
+    # generate_explanation degrades to None (rather than raising) if the
+    # Groq call fails — a flaky/down/rate-limited explanation service
+    # should never turn into a 500 here.
+    return {"explanation": generate_explanation(context)}
 
 
 @app.get("/")
