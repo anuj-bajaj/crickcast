@@ -10,10 +10,13 @@ for any match state.
 
 Four/six/singles are deliberately NOT tested here with a zero-tolerance
 assertion — they're only *expected* to be favorable in the large majority
-of states (balls_remaining moving unfavorably is a genuine, sometimes-
-dominant trade-off for those events), not guaranteed. See
-BACKEND_HANDOVER.md for the full breakdown of that distinction and the
-actual measured rates.
+of states, not guaranteed. Unlike the four events above, every one of
+these three costs a ball (balls_remaining moving unfavorably), which is
+a genuine, sometimes-dominant trade-off against the runs scored — e.g. a
+single taken very late with the required rate already sky-high can
+legitimately hurt more than the run itself helps. That's a real cricket
+trade-off, not a bug, which is why these three don't get the same
+hard guarantee as dot balls and wickets.
 """
 
 import numpy as np
