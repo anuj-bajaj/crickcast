@@ -134,8 +134,24 @@ if __name__ == "__main__":
     import os
     os.makedirs(MODEL_DIR, exist_ok=True)
     joblib.dump(baseline_model, f"{MODEL_DIR}/baseline_model.joblib")
+    # The main model is saved TWICE, deliberately, in two different formats:
+    #   - .joblib (pickle): convenient for offline analysis that wants the
+    #     exact fitted sklearn wrapper object back (feature_importances_,
+    #     get_params(), etc.) — fine for that, since it's always loaded
+    #     back by the same environment/version that just trained it.
+    #   - .json (XGBoost's own native format, via save_model()): what the
+    #     live API actually loads (see phase6b_api.py). XGBoost's own docs
+    #     explicitly warn that pickle/joblib serialization of a Booster is
+    #     NOT guaranteed compatible across XGBoost versions, while
+    #     save_model()/load_model() is designed exactly for this — reading
+    #     a model back safely from a different XGBoost version than the
+    #     one that trained it. A previous version of this project loaded
+    #     the .joblib file directly in the API, which surfaced XGBoost's
+    #     own version-mismatch warning the first time the serving
+    #     environment's XGBoost version drifted from the training one.
     joblib.dump(main_model, f"{MODEL_DIR}/main_model.joblib")
-    print(f"\nSaved trained models to {MODEL_DIR}/")
+    main_model.save_model(f"{MODEL_DIR}/main_model.json")
+    print(f"\nSaved trained models to {MODEL_DIR}/ (main model saved as both .joblib and .json)")
 
     # ---- Feature importance plot for the frontend's Almanack Notes section ----
     # XGBoost's sklearn wrapper reports "gain"-based importance by default
@@ -145,7 +161,6 @@ if __name__ == "__main__":
     # just a design element: it's the direct answer to "what is this model
     # actually using to make its predictions."
     import matplotlib.pyplot as plt
-    import numpy as np
     from plot_style import apply_brand_style, PINE, AMBER
     apply_brand_style()
 

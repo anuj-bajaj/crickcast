@@ -14,10 +14,7 @@ Steps:
 """
 
 import json
-import os
 import zipfile
-import io
-import requests
 import pandas as pd
 from pathlib import Path
 
@@ -176,7 +173,18 @@ def build_dataset():
 
 # ---------- Step 5: Match-level train/val/test split ----------
 def split_by_match(df: pd.DataFrame, seed: int = 42):
-    match_ids = df["match_id"].unique()
+    # sorted() first: df["match_id"].unique() returns IDs in the order
+    # they were first encountered while building the dataframe, which
+    # traces back to build_dataset()'s RAW_DIR.glob("*.json") — filesystem
+    # enumeration order, which is NOT guaranteed stable across machines,
+    # OS/filesystem types, or even repeated runs on the same machine. A
+    # fixed random_state alone doesn't fix this: shuffling a
+    # differently-ordered starting list with the same seed still produces
+    # a different shuffle. Sorting first makes the starting order (and
+    # therefore the resulting split) fully determined by seed alone,
+    # which is the actual reproducibility guarantee "a fixed seed" is
+    # supposed to provide.
+    match_ids = sorted(df["match_id"].unique())
     rng = pd.Series(match_ids).sample(frac=1.0, random_state=seed).values  # shuffle
 
     n = len(rng)

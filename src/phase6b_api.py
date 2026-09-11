@@ -11,12 +11,13 @@ Then test at http://127.0.0.1:8000/docs
 """
 
 import os
-import joblib
+from pathlib import Path
 import pandas as pd
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional, Literal
+from xgboost import XGBClassifier
 
 from .phase6a_explanation import generate_explanation
 
@@ -43,7 +44,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-MODEL = joblib.load("models/main_model.joblib")
+# Absolute path built from this file's own location, not a path relative
+# to whatever directory the process happens to be launched from — a
+# relative "models/main_model.json" only works if uvicorn is started from
+# the project root exactly as the README documents; this works regardless
+# of the caller's working directory (a real difference between "runs on
+# my machine" and "runs under whatever process manager/working directory
+# the hosting platform decides to use").
+MODEL_PATH = Path(__file__).resolve().parent.parent / "models" / "main_model.json"
+# .json (XGBoost's own native format) rather than joblib.load() on the
+# .joblib file — see the comment in phase3_modeling.py's save step for
+# why: joblib/pickle isn't guaranteed compatible across XGBoost versions,
+# and save_model()/load_model() is what XGBoost's own docs recommend
+# specifically to avoid that.
+MODEL = XGBClassifier()
+MODEL.load_model(str(MODEL_PATH))
 
 MAIN_FEATURES = [
     "cum_runs", "cum_wickets", "balls_remaining", "runs_required",
@@ -157,6 +172,75 @@ class ExplainRequest(BaseModel):
     raw_event: Optional[Literal[
         "dot_ball", "single", "two", "three", "four", "six", "wicket", "wide", "noball"
     ]] = None
+    # The delivery immediately BEFORE this one — the single most direct
+    # fix for commentary reading as a sequence of disconnected, isolated
+    # statements rather than a continuous broadcast. Every other fact
+    # here describes only THIS ball's before/after snapshot; there was
+    # previously no memory of anything that came earlier at all. Optional
+    # in the ordinary sense (the very first ball of an innings has no
+    # previous delivery, and that's fine) — the prompt is instructed to
+    # reference it only when there's a genuine connection, never to force
+    # one every single call.
+    previous_event: Optional[Literal[
+        "dot_ball", "single", "two", "three", "four", "six", "wicket", "wide", "noball"
+    ]] = None
+    # Runs scored in the current (possibly still in progress) over, from
+    # its first ball up to and including this one. Genuinely can't be
+    # derived from anything else in this payload — a single ball's
+    # before/after snapshot has no idea what the OTHER balls earlier in
+    # this same over did. Only the frontend's full ball-by-ball history
+    # can compute this, which is why it's the one fact here that's
+    # optional in a different sense from the others: omitting it doesn't
+    # just mean "less precise", it means this specific fact (over total)
+    # is unavailable to the prompt at all, same as before this field
+    # existed.
+    runs_this_over: Optional[int] = Field(default=None, ge=0, le=36)
+    # All four below need the frontend's full ball-by-ball history to
+    # compute — none are derivable from a single ball's before/after
+    # snapshot, same reasoning as runs_this_over above. Each is optional
+    # in the same sense: omitting it just means that specific fact isn't
+    # available to the prompt this call, not an error.
+    is_free_hit: bool = False
+    # "dot"/"boundary" are the original two; "four"/"six"/"wicket"/
+    # "wide"/"noball" track a run of the SAME exact event (see
+    # computeStreakFact in App.jsx) — a distinct, more specific signal
+    # than "boundary" (which fires on any mix of fours and sixes).
+    streak_type: Optional[Literal["dot", "boundary", "four", "six", "wicket", "wide", "noball"]] = None
+    streak_count: Optional[int] = Field(default=None, ge=0, le=20)
+    over_comparison: Optional[Literal["best", "worst"]] = None
+    rate_momentum: Optional[Literal["rising", "falling"]] = None
+
+    # Defense in depth for the two fields above whose values come from
+    # frontend arithmetic over a live ball-by-ball history, not simple
+    # user input — runs_this_over and streak_count. A real production
+    # bug already reached here once: Alter State jumping the score by an
+    # arbitrary amount broke the "everything since the last recorded
+    # over-boundary happened via normal sequential play" assumption that
+    # arithmetic relied on, producing a runs_this_over far outside any
+    # real over's possible range and 422ing the ENTIRE commentary call
+    # over what is, underneath it all, just one optional decorative
+    # fact. The frontend now guards against that specific case (see
+    # computeRunsThisOver's MAX_PLAUSIBLE_OVER_RUNS check in App.jsx),
+    # but that guard only covers the exact failure mode that was found
+    # and reproduced — it's still one client among potentially others,
+    # and the general principle this whole file follows is that an
+    # optional fact should never take down the response over it. mode=
+    # "before" runs ahead of the ge/le check below, so an implausible
+    # value here degrades to "this fact isn't available", same as if it
+    # had simply been omitted, rather than rejecting the request.
+    @field_validator("runs_this_over", mode="before")
+    @classmethod
+    def _tolerate_implausible_runs_this_over(cls, v):
+        if v is None or not isinstance(v, (int, float)) or v < 0 or v > 36:
+            return None
+        return v
+
+    @field_validator("streak_count", mode="before")
+    @classmethod
+    def _tolerate_implausible_streak_count(cls, v):
+        if v is None or not isinstance(v, (int, float)) or v < 0 or v > 20:
+            return None
+        return v
 
 
 @app.post("/explain")
@@ -184,6 +268,13 @@ def explain(req: ExplainRequest):
         "over_just_completed": req.over_just_completed,
         "balls_elapsed": req.balls_elapsed,
         "raw_event": req.raw_event,
+        "previous_event": req.previous_event,
+        "runs_this_over": req.runs_this_over,
+        "is_free_hit": req.is_free_hit,
+        "streak_type": req.streak_type,
+        "streak_count": req.streak_count,
+        "over_comparison": req.over_comparison,
+        "rate_momentum": req.rate_momentum,
     }
     # generate_explanation degrades to None (rather than raising) if the
     # Groq call fails — a flaky/down/rate-limited explanation service
