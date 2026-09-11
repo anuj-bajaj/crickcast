@@ -94,3 +94,56 @@ def test_explain_rejects_missing_required_field(client):
     del payload["proba_after"]
     r = client.post("/explain", json=payload)
     assert r.status_code == 422
+
+
+def test_explain_accepts_runs_this_over(client):
+    """runs_this_over can't be derived from anything else in this
+    payload — only the frontend's full ball history can compute it — so
+    it has to be accepted as its own optional field."""
+    r = client.post("/explain", json=_base_payload(runs_this_over=14))
+    assert r.status_code == 200
+
+
+def test_explain_runs_this_over_optional(client):
+    r = client.post("/explain", json=_base_payload())
+    assert r.status_code == 200
+
+
+def test_explain_accepts_previous_event(client):
+    r = client.post("/explain", json=_base_payload(previous_event="dot_ball"))
+    assert r.status_code == 200
+
+
+def test_explain_previous_event_optional(client):
+    r = client.post("/explain", json=_base_payload())
+    assert r.status_code == 200
+
+
+def test_explain_rejects_invalid_previous_event(client):
+    r = client.post("/explain", json=_base_payload(previous_event="not_a_real_event"))
+    assert r.status_code == 422
+
+
+def test_explain_tolerates_implausible_runs_this_over(client):
+    """Regression test for a real production bug: Alter State jumping
+    the score by an arbitrary amount broke the frontend's over-boundary
+    arithmetic, producing a runs_this_over far outside any real over's
+    possible range (0-36) and 422ing the entire commentary call over
+    what is, underneath it all, one optional decorative fact. Must
+    degrade gracefully (200, fact simply unavailable) instead."""
+    r = client.post("/explain", json=_base_payload(runs_this_over=114))
+    assert r.status_code == 200
+
+
+def test_explain_tolerates_implausible_streak_count(client):
+    """Same defense-in-depth principle as runs_this_over above, applied
+    to the other frontend-computed-arithmetic field."""
+    r = client.post("/explain", json=_base_payload(streak_type="boundary", streak_count=999))
+    assert r.status_code == 200
+
+
+def test_explain_still_accepts_valid_runs_this_over(client):
+    """The tolerance above must not swallow genuinely valid values —
+    only implausible ones."""
+    r = client.post("/explain", json=_base_payload(runs_this_over=14))
+    assert r.status_code == 200
