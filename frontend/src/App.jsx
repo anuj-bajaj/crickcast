@@ -48,6 +48,224 @@ const STORAGE_KEY = 'crickcast_session_v1';
 // dependency, which is why it lives here instead.
 const LEGAL_BALL_EVENTS = new Set(['dot_ball', 'single', 'two', 'three', 'four', 'six', 'wicket']);
 
+// All 9 literal delivery types the backend's raw_event/previous_event
+// fields accept — a superset of LEGAL_BALL_EVENTS (adds wide/noball,
+// which don't count as legal deliveries but are still valid, specific
+// delivery types to describe). Used to filter out non-delivery markers
+// like 'state_set' (a Setup/Alter-State submission, not a literal
+// recorded ball) before they're sent anywhere the backend would reject
+// them with a 422.
+const VALID_RAW_EVENTS = new Set(['dot_ball', 'single', 'two', 'three', 'four', 'six', 'wicket', 'wide', 'noball']);
+
+// Runs scored in the current (possibly still in progress) over, for the
+// explanation layer's "Over total" fact — a single ball's before/after
+// snapshot has no way to know what earlier balls in the SAME over did,
+// so this has to walk the full history. Reuses the exact same over-
+// boundary detection as scorecardChips's overComplete flag (isLegal &&
+// balls bowled in the innings is a multiple of 6) rather than
+// duplicating it with slightly different logic that could quietly drift
+// out of sync with what the scorecard divider actually shows. Takes
+// `priorHistory` (the ball-by-ball record BEFORE this new ball), the new
+// ball's own resulting cum_runs, and its balls_remaining, since the new
+// ball hasn't been pushed into history yet at the point this needs to be
+// called.
+//
+// Returns null (not 0) when there's no reliable baseline to measure
+// from — this matters for a chase started mid-innings via Setup/
+// Scorer's Notebook rather than from ball 1: if the recorded history
+// never contains an actual over boundary (because play only started
+// being tracked partway through the innings), defaulting to "baseline
+// 0" silently reports the ENTIRE innings score as "this over's runs" —
+// a real bug this function used to have, caught when a chase started at
+// over 15 with 114 runs on the board sent runs_this_over: 114, which
+// the API correctly rejected (its sane per-over cap is 36) but for the
+// right underlying reason: 114 was never a real over total, it was the
+// whole innings score, because there was no genuine reference point to
+// measure from. Baseline 0 is only trustworthy when we're actually
+// within the innings' real over 1 — checked here via the NEW ball's own
+// ballsBowledInInnings, not just "history happens to be empty" (history
+// being empty only tells you recording hasn't captured a boundary yet,
+// not that you're near the start of the actual innings).
+// A genuine, physically-possible over total is 0-36 runs (6 sixes) —
+// used below to catch the case where the over-boundary FOUND in history
+// is real, but the runs "since" it no longer are, because something
+// non-sequential happened in between (see computeRunsThisOver's comment
+// for the actual bug this caught: Alter State jumping the score by any
+// amount in one edit, which breaks the "everything since the last
+// recorded over-boundary happened normally, ball by ball" assumption
+// this arithmetic otherwise relies on).
+const MAX_PLAUSIBLE_OVER_RUNS = 36;
+
+function computeRunsThisOver(priorHistory, newCumRuns, newBallsRemaining) {
+  for (let i = priorHistory.length - 1; i >= 0; i--) {
+    const item = priorHistory[i];
+    const isLegal = LEGAL_BALL_EVENTS.has(item.displayEvent);
+    const ballsBowledInInnings = 120 - item.balls_remaining;
+    if (isLegal && ballsBowledInInnings > 0 && ballsBowledInInnings % 6 === 0) {
+      const total = newCumRuns - item.cum_runs;
+      // The over-boundary itself is real (it was genuinely recorded),
+      // but Alter State can still jump the score arbitrarily between
+      // that boundary and now, which is exactly how this produced a
+      // real 422 in production: a plausible-looking boundary was found,
+      // but the runs "since" it came out to something no real over can
+      // ever total (e.g. 114, an entire mid-innings score, because the
+      // user altered state well past that old boundary in one edit).
+      // Rather than send a number the API will rightly reject — turning
+      // one optional decorative fact into a failure for the whole
+      // commentary call — treat an impossible total as unknown, same as
+      // every other "we genuinely don't know" case here.
+      return (total >= 0 && total <= MAX_PLAUSIBLE_OVER_RUNS) ? total : null;
+    }
+  }
+  const ballsBowledNow = 120 - newBallsRemaining;
+  if (ballsBowledNow <= 6) {
+    // genuinely over 1 of a fresh innings — baseline really is 0, but
+    // still sanity-check: Alter State could set an absurd cum_runs even
+    // this early (e.g. jumping straight to 200 runs off 3 balls via
+    // Setup/Scorer's Notebook), which is exactly the same class of
+    // problem as above, just without a detected boundary to blame it on.
+    return (newCumRuns >= 0 && newCumRuns <= MAX_PLAUSIBLE_OVER_RUNS) ? newCumRuns : null;
+  }
+  return null; // started mid-innings/mid-over with no recorded boundary — unknown, don't guess
+}
+
+// Every FULLY completed over's total, in bowling order — reuses the same
+// over-boundary detection as computeRunsThisOver above, just walking the
+// whole history instead of stopping at the first (most recent) boundary
+// found. Used to answer "is the over that just completed the best/worst
+// of the innings so far" — comparing against overs already in the past,
+// never the in-progress one.
+//
+// Same mid-innings-start caveat as computeRunsThisOver above applies to
+// the very FIRST segment specifically: if recording began partway
+// through an over (not at a real over boundary), the runs between "the
+// first entry we have" and "the first detected over-boundary" aren't a
+// genuine full over's total — they're a partial over plus an unknown
+// gap. That first, unreliable segment is skipped entirely rather than
+// reported as if it were a real over (which would silently corrupt any
+// best/worst comparison against it). Every over-boundary onward IS a
+// hard, known reference point regardless of how the session started, so
+// everything after the first one is fully reliable.
+function computeCompletedOverTotals(priorHistory) {
+  const totals = [];
+  let baseline = null;
+  let baselineIsReliable = false;
+  for (const item of priorHistory) {
+    const isLegal = LEGAL_BALL_EVENTS.has(item.displayEvent);
+    const ballsBowledInInnings = 120 - item.balls_remaining;
+    if (baseline === null) {
+      // First entry ever seen in this walk — only trust "runs since
+      // here" as a genuine full over if we're actually within the
+      // innings' real over 1; otherwise we don't know what happened
+      // before recording started.
+      baselineIsReliable = ballsBowledInInnings <= 6;
+      baseline = 0;
+    }
+    if (isLegal && ballsBowledInInnings > 0 && ballsBowledInInnings % 6 === 0) {
+      if (baselineIsReliable) {
+        totals.push(item.cum_runs - baseline);
+      }
+      baseline = item.cum_runs;
+      baselineIsReliable = true; // every over-boundary onward is a real, known reference point
+    }
+  }
+  return totals;
+}
+
+// Consecutive dot balls or consecutive boundaries leading INTO this ball
+// (this ball included) — a real, well-worn commentary trope ("that's
+// three dots on the trot", "back-to-back boundaries") that has nothing
+// to do with any single ball's before/after swing, only with the recent
+// sequence of deliveries. A wide/no-ball/single/etc. breaks either
+// streak immediately, same as it would break the narrative for a real
+// commentator — conceding a run, even an extra, isn't "another dot."
+//
+// Also tracks the more specific case of the exact SAME event repeating
+// (three fours in a row, not just "three boundaries" of mixed sizes;
+// back-to-back wickets; back-to-back wides or no-balls) — these get
+// their own distinct phrasing on the backend ("3 fours on the trot",
+// "2 wickets in 2 balls") rather than folding into the generic
+// "boundary" bucket, which is exactly what a real commentator would
+// call out as a bigger deal than an ordinary mixed pair of boundaries.
+function computeStreakFact(priorHistory, currentDisplayEvent) {
+  function consecutiveCount(matches) {
+    let count = 1; // this ball itself
+    for (let i = priorHistory.length - 1; i >= 0; i--) {
+      if (!matches(priorHistory[i].displayEvent)) break;
+      count++;
+    }
+    return count;
+  }
+
+  switch (currentDisplayEvent) {
+    case 'dot_ball': {
+      const count = consecutiveCount((evt) => evt === 'dot_ball');
+      return count >= 3 ? { type: 'dot', count } : null;
+    }
+    // A wicket, wide, or no-ball repeating back-to-back is rare enough
+    // that two in a row is already worth flagging — unlike dots or
+    // boundaries, there's no "that's just normal cricket" reading of
+    // two wickets with literally nothing in between.
+    case 'wicket': {
+      const count = consecutiveCount((evt) => evt === 'wicket');
+      return count >= 2 ? { type: 'wicket', count } : null;
+    }
+    case 'wide': {
+      const count = consecutiveCount((evt) => evt === 'wide');
+      return count >= 2 ? { type: 'wide', count } : null;
+    }
+    case 'noball': {
+      const count = consecutiveCount((evt) => evt === 'noball');
+      return count >= 2 ? { type: 'noball', count } : null;
+    }
+    // Fours and sixes: check the exact-same-shot streak first (a
+    // higher bar, since fours especially are common enough that a mix
+    // of "four, four, six" is closer to normal good batting than a
+    // notable trend) — only falling back to the broader mixed-boundary
+    // count when the exact streak doesn't clear its own bar, so the
+    // two never both fire for the same ball.
+    case 'four': {
+      const exact = consecutiveCount((evt) => evt === 'four');
+      if (exact >= 3) return { type: 'four', count: exact };
+      const mixed = consecutiveCount((evt) => evt === 'four' || evt === 'six');
+      return mixed >= 2 ? { type: 'boundary', count: mixed } : null;
+    }
+    case 'six': {
+      const exact = consecutiveCount((evt) => evt === 'six');
+      if (exact >= 2) return { type: 'six', count: exact };
+      const mixed = consecutiveCount((evt) => evt === 'four' || evt === 'six');
+      return mixed >= 2 ? { type: 'boundary', count: mixed } : null;
+    }
+    default:
+      return null;
+  }
+}
+
+// Required run rate now vs. roughly 3 overs (18 balls) ago — a genuine
+// multi-over trend real commentary references ("the rate's crept up
+// over the last few overs") that no single ball's before/after snapshot
+// could ever capture on its own. Skipped if there isn't 3 overs of
+// history yet, or if the shift is too small to be a real trend (under
+// half a run per over) rather than ordinary ball-to-ball noise.
+function computeRateMomentum(priorHistory, currentRate, ballsRemaining) {
+  if (currentRate === null || currentRate === undefined) return null;
+  const ballsBowledNow = 120 - ballsRemaining;
+  const targetBallsAgo = ballsBowledNow - 18;
+  if (targetBallsAgo < 6) return null;
+  let refRate = null;
+  for (const item of priorHistory) {
+    const ballsBowledAtItem = 120 - item.balls_remaining;
+    if (ballsBowledAtItem >= targetBallsAgo) {
+      refRate = item.required_run_rate;
+      break;
+    }
+  }
+  if (refRate === null || refRate === undefined) return null;
+  const diff = currentRate - refRate;
+  if (Math.abs(diff) < 0.5) return null;
+  return diff > 0 ? 'rising' : 'falling';
+}
+
 // Nothing is pre-filled here on purpose — the whole point of the setup
 // stage is that the user supplies the target and (optionally) the current
 // match state, and every derived number is computed from that.
@@ -628,6 +846,55 @@ export default function App() {
         over_just_completed: overJustCompleted,
         balls_elapsed: ballsElapsed,
         raw_event: rawEvent || null,
+        // `history` here is the closure's value from BEFORE this ball —
+        // setHistory above is async/batched, so this still correctly
+        // reflects "everything prior to the ball currently being
+        // processed", which is exactly what all four helpers below need
+        // as their look-back window.
+        runs_this_over: computeRunsThisOver(history, stats.cumRuns, stats.ballsRemaining),
+        // Free hit: true only when the immediately preceding ball was a
+        // no-ball — a rule fact about THIS delivery specifically (it
+        // changes what's actually at stake), not a multi-ball trend like
+        // the three below.
+        is_free_hit: history.length > 0 && history[history.length - 1].displayEvent === 'noball',
+        // Previous ball: the single most direct fix for commentary
+        // reading as disconnected, isolated statements rather than a
+        // continuous broadcast — see phase6a_explanation.py's "Previous
+        // ball" fact. `displayEvent` can also be the 'state_set' marker
+        // (from a Setup/Alter-State submission, not a literal recorded
+        // delivery — see triggerPrediction's displayEvent comment) or
+        // undefined for entries recorded before this field existed in
+        // older saved sessions; VALID_RAW_EVENTS guards against sending
+        // either through, since the backend's previous_event field only
+        // accepts the same 9 literal delivery types raw_event does.
+        ...(() => {
+          if (history.length === 0) return {};
+          const lastEvent = history[history.length - 1].displayEvent;
+          return VALID_RAW_EVENTS.has(lastEvent) ? { previous_event: lastEvent } : {};
+        })(),
+        ...(() => {
+          const streak = computeStreakFact(history, rawEvent);
+          return streak ? { streak_type: streak.type, streak_count: streak.count } : {};
+        })(),
+        ...(() => {
+          if (!overJustCompleted) return {};
+          const priorTotals = computeCompletedOverTotals(history);
+          if (priorTotals.length === 0) return {};
+          const thisOverTotal = computeRunsThisOver(history, stats.cumRuns, stats.ballsRemaining);
+          // Explicit null check first — `null > n` and `null < n` both
+          // coerce null to 0 in JS, which would otherwise silently
+          // report an over we have no real total for as "the quietest
+          // over of the innings" the moment any prior over scored above
+          // zero. An unknown total must never enter this comparison.
+          if (thisOverTotal === null) return {};
+          if (thisOverTotal > Math.max(...priorTotals)) return { over_comparison: 'best' };
+          if (thisOverTotal < Math.min(...priorTotals)) return { over_comparison: 'worst' };
+          return {};
+        })(),
+        ...(() => {
+          const momentum = computeRateMomentum(history, stats.requiredRunRate, stats.ballsRemaining);
+          return momentum ? { rate_momentum: momentum } : {};
+        })(),
       };
       fetch(`${API_BASE}/explain`, {
         method: 'POST',
